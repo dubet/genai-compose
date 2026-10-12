@@ -1,0 +1,356 @@
+services:
+  nginx:
+    image: ${NGINX_IMAGE}
+    hostname: ${NGINX_HOST}
+    container_name: ${NGINX_HOST}
+    networks:
+    - org-net
+    ports:
+    - "80:80"
+    - "443:443"
+    volumes:
+    - ./services/nginx/etc/nginx/conf.d/default.conf:/etc/nginx/conf.d/default.conf:ro
+    - ./services/nginx/etc/nginx/certs:/etc/nginx/certs:ro
+
+  keycloak:
+    hostname: ${KEYCLOAK_HOST}
+    container_name: ${KEYCLOAK_HOST}
+    image: ${KEYCLOAK_IMAGE}
+    networks:
+      org-net:
+        aliases:
+        - keycloak.example.local
+    command: start-dev --hostname-strict false --proxy-headers forwarded
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://${POSTGRESQL_HOST}:${POSTGRESQL_PORT}/${KEYCLOAK_POSTGRESQL_NAME}
+      KC_DB_USERNAME: ${POSTGRESQL_USER}
+      KC_DB_PASSWORD: ${POSTGRESQL_PASS}
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_USER}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_PASS}
+      # KC_HOSTNAME: https://keycloak.example.local
+      KC_HTTPS_CERTIFICATE_FILE: /opt/keycloak/conf/keycloak.crt
+      KC_HTTPS_CERTIFICATE_KEY_FILE: /opt/keycloak/conf/keycloak.key
+    ports:
+    - 8443:8443
+    - 8080:8080
+    volumes:
+    - ./services/nginx/etc/nginx/certs/keycloak.crt:/opt/keycloak/conf/keycloak.crt:ro
+    - ./services/nginx/etc/nginx/certs/keycloak.key:/opt/keycloak/conf/keycloak.key:ro
+    depends_on:
+      postgresql:
+        condition: service_healthy
+    restart: unless-stopped
+
+  litellm:
+    container_name: ${LITELLM_HOST}
+    hostname: ${LITELLM_HOST}
+    image: ${LITELLM_IMAGE}
+    networks:
+    - org-net
+    ports:
+    - ${LITELLM_PORT}:${LITELLM_PORT}
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      LITELLM_SALT_KEY: ${LITELLM_SALT_KEY}
+      DATABASE_URL: postgresql://${POSTGRESQL_USER}:${POSTGRESQL_PASS}@${POSTGRESQL_HOST}:${POSTGRESQL_PORT}/${LITELLM_POSTGRESQL_NAME}
+      STORE_MODEL_IN_DB: "True"
+      # LANGFUSE_SECRET_KEY: ""
+      # LANGFUSE_PUBLIC_KEY: ""
+    volumes:
+    - type: bind
+      source: ./services/litellm/config.yaml
+      target: /app/config.yaml
+    command: ["--config", "/app/config.yaml"]
+    depends_on:
+      postgresql:
+        condition: service_healthy
+
+  librechat-admin-panel:
+    container_name: ${LIBRECHAT_ADMIN_PANEL_HOST}
+    depends_on:
+    - ${LIBRECHAT_WEB_HOST}
+    environment:
+      API_SERVER_URL: http://${LIBRECHAT_WEB_HOST}:${LIBRECHAT_WEB_PORT}
+      PORT: 3000
+      SESSION_COOKIE_SECURE: false
+      SESSION_SECRET: ${LIBRECHAT_ADMIN_PANEL_SESSION_SECRET}
+      VITE_API_BASE_URL: http://localhost:${LIBRECHAT_WEB_PORT}
+    hostname: ${LIBRECHAT_ADMIN_PANEL_HOST}
+    image: ${LIBRECHAT_ADMIN_PANEL_IMAGE}
+    networks:
+    - org-net
+    ports:
+    - ${LIBRECHAT_ADMIN_PANEL_PORT}:3000
+    restart: always
+
+  meilisearch:
+    container_name: ${MEILISEARCH_HOST}
+    environment:
+      MEILI_HOST: http://${MEILISEARCH_HOST}:${MEILISEARCH_PORT}
+      MEILI_MASTER_KEY: ${MEILISEARCH_MASTER_KEY}
+      MEILI_NO_ANALYTICS: true
+    hostname: ${MEILISEARCH_HOST}
+    image: ${MEILISEARCH_IMAGE}
+    networks:
+    - org-net
+    ports:
+    - ${MEILISEARCH_PORT}
+    user: 1000:1000
+    volumes:
+    - ./.data/${MEILISEARCH_HOST}/meili_data:/meili_data
+
+  mongodb:
+    command: mongod --noauth
+    container_name: ${MONGODB_HOST}
+    hostname: ${MONGODB_HOST}
+    image: ${MONGODB_IMAGE}
+    networks:
+    - org-net
+    ports:
+    - ${MONGODB_PORT}
+    restart: always
+    user: 1000:1000
+    volumes:
+    - ./.data/${MONGODB_HOST}/data/db:/data/db
+
+  postgresql:
+    container_name: ${POSTGRESQL_HOST}
+    command: -c 'max_connections=200'
+    environment:
+      POSTGRES_DB: ${POSTGRESQL_NAME}
+      POSTGRES_PASSWORD: ${POSTGRESQL_PASS}
+      POSTGRES_USER: ${POSTGRESQL_USER}
+      TZ: UTC
+      PGTZ: UTC
+    hostname: ${POSTGRESQL_HOST}
+    image: ${POSTGRESQL_IMAGE}
+    ports:
+    - ${POSTGRESQL_PORT}:${POSTGRESQL_PORT}
+    networks:
+    - org-net
+    volumes:
+    - ./.data/${POSTGRESQL_HOST}/var/lib/postgresql/data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  librechat-rag-api:
+    container_name: ${LIBRECHAT_RAG_API_HOST}
+    depends_on:
+    - ${POSTGRESQL_HOST}
+    environment:
+      DB_HOST: ${POSTGRESQL_HOST}
+      DB_PORT: ${POSTGRESQL_PORT}
+      POSTGRES_DB: ${POSTGRESQL_NAME}
+      POSTGRES_USER: ${POSTGRESQL_USER}
+      POSTGRES_PASSWORD: ${POSTGRESQL_PASS}
+      OPENAI_API_KEY: user_provided
+      RAG_PORT: ${LIBRECHAT_RAG_API_PORT}
+    hostname: ${LIBRECHAT_RAG_API_HOST}
+    image: ${LIBRECHAT_RAG_API_IMAGE}
+    networks:
+    - org-net
+    ports:
+    - ${LIBRECHAT_RAG_API_PORT}
+
+  librechat-web:
+    container_name: ${LIBRECHAT_WEB_HOST}
+    depends_on:
+    - ${MONGODB_HOST}
+    - ${LIBRECHAT_RAG_API_HOST}
+    environment:
+      HOST: "0.0.0.0"
+      LIBRECHAT_TEMP_CREDENTIALS_PATH: /app/data/.env.temp
+      MEILI_HOST: http://${MEILISEARCH_HOST}:${MEILISEARCH_PORT}
+      MONGO_URI: mongodb://${MONGODB_HOST}:${MONGODB_PORT}/LibreChat
+      RAG_API_URL: http://${LIBRECHAT_RAG_API_HOST}:${LIBRECHAT_RAG_API_PORT}
+      RAG_PORT: ${LIBRECHAT_RAG_API_PORT}
+      ALLOW_REGISTRATION: false
+      ALLOW_SOCIAL_LOGIN: true
+      DEBUG_LOGGING: true
+      DEBUG_CONSOLE: true
+      OPENID_ISSUER: "https://keycloak.example.local:8443/realms/default"
+      OPENID_CLIENT_ID: ${LIBRECHAT_WEB_KEYCLOAK_CLIENT_ID}
+      OPENID_CLIENT_SECRET: ${LIBRECHAT_WEB_KEYCLOAK_CLIENT_SECRET}
+      OPENID_SESSION_SECRET: ${LIBRECHAT_WEB_KEYCLOAK_SESSION_SECRET}
+      OPENID_CALLBACK_URL: "/oauth/openid/callback"
+      OPENID_SCOPE: "openid profile email"
+      # Optional: restrict login to users with a Keycloak role
+      # OPENID_REQUIRED_ROLE=librechat-user
+      # OPENID_REQUIRED_ROLE_PARAMETER_PATH=realm_access.roles
+      # OPENID_REQUIRED_ROLE_TOKEN_KIND=access
+
+      # Optional: redirect through Keycloak logout
+      OPENID_USE_END_SESSION_ENDPOINT: true
+      NODE_EXTRA_CA_CERTS: /run/certs/local-ca.crt
+      NODE_TLS_REJECT_UNAUTHORIZED: 0
+    hostname: ${LIBRECHAT_WEB_HOST}
+    image: ${LIBRECHAT_WEB_IMAGE}
+    networks:
+    - org-net
+    ports:
+    - "${LIBRECHAT_WEB_PORT}"
+    user: 1000:1000
+    volumes:
+    - type: bind
+      source: ./services/librechat/librechat.yaml
+      target: /app/librechat.yaml
+    - ./services/nginx/etc/nginx/certs/local-ca.crt:/run/certs/local-ca.crt:ro
+    - ./services/nginx/etc/nginx/certs/local-ca.crt:/etc/ssl/certs/local-ca.crt:ro
+    - ./.data/${LIBRECHAT_WEB_HOST}/app/client/public/images:/app/client/public/images
+    - ./.data/${LIBRECHAT_WEB_HOST}/app/uploads:/app/uploads
+    - ./.data/${LIBRECHAT_WEB_HOST}/app/logs:/app/logs
+    - ./.data/${LIBRECHAT_WEB_HOST}/app/skill:/app/skill
+    - ./.data/${LIBRECHAT_WEB_HOST}/app/data:/app/data
+
+  clickhouse:
+    hostname: ${CLICKHOUSE_HOST}
+    container_name: ${CLICKHOUSE_HOST}
+    image: ${CLICKHOUSE_IMAGE}
+    networks:
+    - org-net
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_NAME}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASS}
+    volumes:
+    - ./.data/${CLICKHOUSE_HOST}/var/lib/clickhouse:/var/lib/clickhouse
+    - ./.data/${CLICKHOUSE_HOST}/var/log/clickhouse-server:/var/log/clickhouse-server
+    ports:
+    - 127.0.0.1:${CLICKHOUSE_PORT}:${CLICKHOUSE_PORT}
+    - 127.0.0.1:9000:9000
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:${CLICKHOUSE_PORT}/ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 1s
+
+  minio:
+    hostname: ${MINIO_HOST}
+    container_name: ${MINIO_HOST}
+    image: ${MINIO_IMAGE}
+    networks:
+    - org-net
+    entrypoint: sh
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":${MINIO_CONSOLE_PORT}" /data'
+    environment:
+      MINIO_ROOT_USER: ${MINIO_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_PASS}
+    ports:
+    - ${MINIO_PORT}:9000
+    - 127.0.0.1:${MINIO_CONSOLE_PORT}:${MINIO_CONSOLE_PORT}
+    volumes:
+    - ./.data/${MINIO_HOST}/data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 1s
+      timeout: 5s
+      retries: 5
+      start_period: 1s
+
+  redis:
+    hostname: ${REDIS_HOST}
+    container_name: ${REDIS_HOST}
+    image: ${REDIS_IMAGE}
+    networks:
+    - org-net
+    command: >
+      --requirepass ${REDIS_PASS}
+      --maxmemory-policy noeviction
+    ports:
+    - ${REDIS_PORT}:${REDIS_PORT}
+    volumes:
+    - ./.data/${REDIS_HOST}/data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 10s
+      retries: 10
+
+  langfuse-worker:
+    hostname: ${LANGFUSE_WORKER_HOST}
+    container_name: ${LANGFUSE_WORKER_HOST}
+    image: ${LANGFUSE_WORKER_IMAGE}
+    networks:
+    - org-net
+    restart: always
+    depends_on: &langfuse-depends-on
+      postgresql:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    ports:
+    - ${LANGFUSE_WORKER_PORT}:3030
+    environment: &langfuse-worker-env
+      NEXTAUTH_URL: http://localhost:3000
+      DATABASE_URL: postgresql://${POSTGRESQL_USER}:${POSTGRESQL_PASS}@${POSTGRESQL_HOST}:${POSTGRESQL_PORT}/${LANGFUSE_WORKER_POSTGRESQL_NAME}
+      SALT: ${LANGFUSE_WORKER_SALT}
+      ENCRYPTION_KEY: ${LANGFUSE_WORKER_ENCRYPTION_KEY}
+      TELEMETRY_ENABLED: false
+      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: false
+      CLICKHOUSE_MIGRATION_URL: clickhouse://${CLICKHOUSE_HOST}:${CLICKHOUSE_MIGRATION_PORT}
+      CLICKHOUSE_URL: http://${CLICKHOUSE_HOST}:${CLICKHOUSE_PORT}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASS}
+      CLICKHOUSE_CLUSTER_ENABLED: false
+      CLICKHOUSE_CLUSTER_NAME: ${CLICKHOUSE_NAME}
+      LANGFUSE_USE_AZURE_BLOB: false
+      LANGFUSE_USE_OCI_NATIVE_OBJECT_STORAGE: false
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${MINIO_USER}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_PASS}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://${MINIO_HOST}:${MINIO_PORT}
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: true
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${MINIO_USER}
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_PASS}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://${MINIO_HOST}:${MINIO_PORT}
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: true
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+      LANGFUSE_OBSERVATION_FIELD_OVERFLOW_ENABLED: false
+      LANGFUSE_S3_BATCH_EXPORT_ENABLED: false
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+      REDIS_AUTH: ${REDIS_PASS}
+
+  langfuse-web:
+    hostname: ${LANGFUSE_WEB_HOST}
+    container_name: ${LANGFUSE_WEB_HOST}
+    image: ${LANGFUSE_WEB_IMAGE}
+    networks:
+    - org-net
+    restart: always
+    depends_on: *langfuse-depends-on
+    ports:
+    - ${LANGFUSE_WEB_PORT}:3000
+    environment:
+      <<: *langfuse-worker-env
+      NEXTAUTH_SECRET: mysecret
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: ${LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT:-http://localhost:9090}
+      LANGFUSE_S3_MEDIA_UPLOAD_INTERNAL_ENDPOINT: ${LANGFUSE_S3_MEDIA_UPLOAD_INTERNAL_ENDPOINT:-http://minio:9000}
+      LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID:-myorg}
+      LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME:-MyOrg}
+      LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID:-myproject}
+      LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_INIT_PROJECT_NAME:-My Project}
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-admin@localhost.local}
+      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME:-admin}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-adminadmin}
+
+networks:
+  org-net:
+    driver: bridge
+    name: org-net
